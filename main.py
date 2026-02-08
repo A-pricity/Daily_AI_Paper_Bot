@@ -6,6 +6,8 @@ import time
 import httpx
 from dotenv import load_dotenv
 import json
+import feedparser
+from typing import List, Dict, Optional
 
 # 加载 .env 文件
 load_dotenv()
@@ -18,6 +20,37 @@ if not NVIDIA_API_KEY:
 # 获取企业微信 Webhook URL（可选）
 WECHAT_WEBHOOK = os.getenv('WECHAT_WEBHOOK')
 
+# 数据源配置
+SOURCES_CONFIG = {
+    'arxiv': {
+        'enabled': True,
+        'base_url': 'http://export.arxiv.org/api/query?',
+        'search_topics': [
+            "Large Language Models",
+            "LLM Agents",
+            "Chain of Thought",
+            "Batch of Thought",
+            "LLM Reasoning"
+        ]
+    },
+    'semantic_scholar': {
+        'enabled': False,  # 默认关闭，需要 API Key
+        'api_key': os.getenv('SEMANTIC_SCHOLAR_API_KEY'),
+        'search_topics': [
+            "large language models",
+            "LLM agents",
+            "reasoning optimization"
+        ]
+    },
+    'springer': {
+        'enabled': True,  # Springer 有公开的 RSS feeds
+        'urls': [
+            'https://link.springer.com/rss/journal/volumesandissues/12559',  # Machine Learning
+            'https://link.springer.com/rss/journal/volumesandissues/11032',  # Neural Computation
+        ]
+    }
+}
+
 # 初始化 NVIDIA 客户端
 http_client = httpx.Client(timeout=120.0)
 client = OpenAI(
@@ -25,6 +58,98 @@ client = OpenAI(
     api_key=NVIDIA_API_KEY,
     http_client=http_client
 )
+
+def get_papers_from_springer(max_results=5) -> List[Dict]:
+    """
+    从 Springer RSS feeds 获取最新论文
+    """
+    papers_data = []
+    urls = SOURCES_CONFIG['springer'].get('urls', [])
+
+    for url in urls:
+        if not SOURCES_CONFIG['springer'].get('enabled', False):
+            continue
+
+        try:
+            print(f"正在从 Springer 获取论文: {url}")
+            feed = feedparser.parse(url)
+
+            for entry in feed.entries[:max_results]:
+                # 提取论文信息
+                authors = []
+                if hasattr(entry, 'authors'):
+                    authors = [author.get('name', '') for author in entry.authors]
+                elif hasattr(entry, 'author'):
+                    authors = [entry.author]
+
+                papers_data.append({
+                    "title": entry.get('title', '').strip(),
+                    "authors": authors,
+                    "abstract": entry.get('summary', '') or entry.get('description', ''),
+                    "url": entry.get('link', ''),
+                    "published": entry.get('published', ''),
+                    "source": "Springer"
+                })
+
+            print(f"✓ 从 Springer 获取到 {len(feed.entries[:max_results])} 篇论文")
+
+        except Exception as e:
+            print(f"⚠ Springer 获取失败: {e}")
+
+    return papers_data
+
+
+def get_papers_from_semantic_scholar(topic: str, max_results=3) -> List[Dict]:
+    """
+    从 Semantic Scholar API 获取论文（需要 API Key）
+    """
+    if not SOURCES_CONFIG['semantic_scholar'].get('enabled', False):
+        return []
+
+    api_key = SOURCES_CONFIG['semantic_scholar'].get('api_key')
+    if not api_key:
+        print("⚠ 未配置 Semantic Scholar API Key，跳过")
+        return []
+
+    papers_data = []
+    base_url = "https://api.semanticscholar.org/graph/v1/paper/search"
+
+    try:
+        print(f"正在从 Semantic Scholar 检索: {topic}")
+
+        params = {
+            'query': topic,
+            'limit': max_results,
+            'fields': 'title,authors,abstract,url,publicationDate',
+            'year': datetime.datetime.now().year  # 只获取今年的论文
+        }
+
+        headers = {'x-api-key': api_key}
+        response = httpx.get(base_url, params=params, headers=headers, timeout=30.0)
+
+        if response.status_code == 200:
+            data = response.json()
+            for paper in data.get('data', []):
+                authors = [author.get('name', '') for author in paper.get('authors', [])]
+
+                papers_data.append({
+                    "title": paper.get('title', ''),
+                    "authors": authors,
+                    "abstract": paper.get('abstract', '') or '无摘要',
+                    "url": paper.get('url', ''),
+                    "published": paper.get('publicationDate', ''),
+                    "source": "Semantic Scholar"
+                })
+
+            print(f"✓ 从 Semantic Scholar 获取到 {len(papers_data)} 篇论文")
+        else:
+            print(f"⚠ Semantic Scholar API 错误: {response.status_code}")
+
+    except Exception as e:
+        print(f"⚠ Semantic Scholar 请求失败: {e}")
+
+    return papers_data
+
 
 def get_latest_papers_with_retry(topic="Large Language Models", max_results=3, max_retries=3):
     """
@@ -272,39 +397,49 @@ def send_to_wechat(message):
 
 
 def main():
-    # 1. 获取论文
-    # 专注于：大语言模型、智能体、增强型LLM推理和推理优化
-    search_topics = [
-        "Large Language Models",
-        "LLM Agents",
-        "Chain of Thought",
-        "Batch of Thought",
-        "LLM Reasoning"
-    ]
-
+    # 1. 从多个数据源获取论文
     print("="*50)
     print("开始获取论文数据...")
     print("="*50)
 
     all_papers = []
-    for i, topic in enumerate(search_topics):
-        print(f"\n[{i+1}/{len(search_topics)}] 处理主题: {topic}")
 
-        # 每次主题之间添加额外延迟
-        if i > 0:
-            print(f"等待 15 秒后继续下一个主题...")
-            time.sleep(15)
+    # 1.1 从 ArXiv 获取论文
+    if SOURCES_CONFIG['arxiv'].get('enabled', False):
+        print("\n📚 数据源: ArXiv")
+        search_topics = SOURCES_CONFIG['arxiv'].get('search_topics', [])
+        for i, topic in enumerate(search_topics):
+            print(f"\n[{i+1}/{len(search_topics)}] 处理主题: {topic}")
 
-        # 单个主题只获取 1 篇，减少请求压力
-        papers = get_latest_papers_with_retry(topic=topic, max_results=1, max_retries=3)
-        all_papers.extend(papers)
+            # 每次主题之间添加延迟
+            if i > 0:
+                print(f"等待 15 秒后继续下一个主题...")
+                time.sleep(15)
+
+            papers = get_latest_papers_with_retry(topic=topic, max_results=1, max_retries=3)
+            all_papers.extend(papers)
+
+    # 1.2 从 Springer 获取论文
+    if SOURCES_CONFIG['springer'].get('enabled', False):
+        print("\n📚 数据源: Springer")
+        springer_papers = get_papers_from_springer(max_results=2)
+        all_papers.extend(springer_papers)
+
+    # 1.3 从 Semantic Scholar 获取论文
+    if SOURCES_CONFIG['semantic_scholar'].get('enabled', False):
+        print("\n📚 数据源: Semantic Scholar")
+        ss_topics = SOURCES_CONFIG['semantic_scholar'].get('search_topics', [])
+        for topic in ss_topics:
+            papers = get_papers_from_semantic_scholar(topic, max_results=1)
+            all_papers.extend(papers)
 
     # 去重（基于URL）
     seen_urls = set()
     unique_papers = []
     for paper in all_papers:
-        if paper['url'] not in seen_urls:
-            seen_urls.add(paper['url'])
+        url = paper.get('url', '')
+        if url not in seen_urls:
+            seen_urls.add(url)
             unique_papers.append(paper)
 
     # 限制最多5篇
@@ -316,8 +451,15 @@ def main():
 
     print(f"\n✓ 共获取到 {len(papers)} 篇论文\n")
 
+    # 统计各数据源
+    source_stats = {}
+    for paper in papers:
+        source = paper.get('source', 'Unknown')
+        source_stats[source] = source_stats.get(source, 0) + 1
+
     daily_report = f"# 📅 AI 前沿论文日报 ({datetime.date.today()})\n\n"
     daily_report += f"**主题**: 大语言模型、智能体、增强型LLM推理和推理优化\n\n"
+    daily_report += f"**数据源**: {', '.join(source_stats.keys())}\n\n"
     daily_report += f"今日为您精选 {len(papers)} 篇最新论文\n\n"
 
     # 2. 逐篇处理
@@ -328,9 +470,11 @@ def main():
         # 拼接内容
         daily_report += f"{summary}\n"
         daily_report += f"🔗 **原文链接**: {paper['url']}\n"
+        if 'source' in paper:
+            daily_report += f"📚 **来源**: {paper['source']}\n"
         daily_report += "---\n\n"
 
-    # 3. 输出结果（实际部署时这里可以替换为发送邮件或推送到微信的代码）
+    # 3. 输出结果
     print("\n" + "="*20 + " 生成结果 " + "="*20 + "\n")
     print(daily_report)
 
@@ -345,6 +489,7 @@ def main():
         # 生成适合微信的消息格式（简化版）
         wechat_message = f"## 📅 AI 前沿论文日报 ({datetime.date.today()})\n\n"
         wechat_message += f"**主题**: 大语言模型、智能体、增强型LLM推理和推理优化\n\n"
+        wechat_message += f"**数据源**: {', '.join(source_stats.keys())}\n\n"
         wechat_message += f"今日为您精选 {len(papers)} 篇最新论文\n\n"
 
         # 从已生成的报告中提取论文标题
@@ -356,7 +501,7 @@ def main():
             wechat_message += f"**{i}. {title}**\n\n"
 
         # 添加 GitHub 链接（需要用户替换为自己的仓库地址）
-        wechat_message += f"\n📮 [点击查看完整报告](https://github.com/your-username/daily_ai_paper_bot/blob/main/daily_report.md)"
+        wechat_message += f"\n📮 [点击查看完整报告](https://github.com/A-pricity/Daily_AI_Paper_Bot/blob/main/daily_report.md)"
 
         send_to_wechat(wechat_message)
     else:
