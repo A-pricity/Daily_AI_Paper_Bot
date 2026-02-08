@@ -1,9 +1,6 @@
 name: Daily AI Paper Digest
 
 on:
-  # 推送到 main 分支时自动运行
-  push:
-    branches: [ main ]
   # 定时任务：每天 UTC 时间 01:00 运行（对应北京时间早上 09:00）
   schedule:
     - cron: '0 1 * * *'
