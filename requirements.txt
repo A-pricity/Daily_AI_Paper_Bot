@@ -1,2 +1,4 @@
-google-generativeai
 arxiv
+openai
+python-dotenv
+httpx
