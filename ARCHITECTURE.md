@@ -17,6 +17,11 @@ daily_ai_paper_bot/
 ├── llm/                           # LLM 调用模块
 │   ├── __init__.py
 │   └── client.py                   # NVIDIA API 客户端
+├── formatters/                     # 格式化器模块
+│   ├── __init__.py
+│   ├── base.py                     # 抽象基类
+│   ├── markdown.py                 # Markdown 格式化器
+│   └── wechat.py                   # 企业微信格式化器
 ├── notification/                   # 通知模块
 │   ├── __init__.py
 │   └── wechat.py                  # 企业微信推送
@@ -108,11 +113,41 @@ summary = generate_paper_summary(paper_dict)
 
 ---
 
-### 4. notification (通知模块)
+### 4. formatters (格式化器模块)
+
+**职责**：
+- 将论文数据转换为不同格式的消息
+- 支持多种输出格式（Markdown、企业微信等）
+- 统一的格式化接口
+
+**核心类**：
+- `BaseFormatter`: 抽象基类，定义统一接口
+- `MarkdownFormatter`: Markdown 格式化器，用于生成文件
+- `WeChatFormatter`: 企业微信格式化器，紧凑布局，适合移动端
+
+**接口**：
+```python
+from formatters import MarkdownFormatter, WeChatFormatter
+
+# Markdown 格式化器（用于文件）
+md_formatter = MarkdownFormatter()
+markdown_report = md_formatter.format_report(papers, metadata)
+
+# 企业微信格式化器（用于推送）
+wechat_formatter = WeChatFormatter()
+wechat_message = wechat_formatter.format_report(papers, metadata)
+
+# 单篇论文格式化
+formatted_paper = wechat_formatter.format_paper(paper)
+```
+
+---
+
+### 5. notification (通知模块)
 
 **职责**：
 - 封装企业微信推送逻辑
-- 处理消息格式化和发送
+- 集成格式化器，支持自动格式化发送
 
 **核心类**：
 - `WeChatNotifier`: 企业微信通知器
@@ -122,12 +157,17 @@ summary = generate_paper_summary(paper_dict)
 from notification import WeChatNotifier
 
 notifier = WeChatNotifier()
+
+# 发送已格式化的消息
 success = notifier.send(markdown_message)
+
+# 发送论文报告（自动格式化）
+success = notifier.send_report(papers, metadata)
 ```
 
 ---
 
-### 5. utils (工具模块)
+### 6. utils (工具模块)
 
 **职责**：
 - 提供通用的辅助函数
@@ -155,7 +195,7 @@ unique = deduplicate_papers(papers_list)
 
 ---
 
-### 6. main (主程序)
+### 7. main (主程序)
 
 **职责**：
 - 协调各模块完成日报生成流程
@@ -172,9 +212,10 @@ bot.run()
 
 # PaperBot.run() 内部流程：
 # 1. fetch_all_papers() - 从所有数据源获取论文
-# 2. generate_daily_report() - 生成日报内容
-# 3. save_report() - 保存到文件
-# 4. send_wechat_notification() - 推送到微信
+# 2. generate_summaries() - 为每篇论文生成 LLM 摘要
+# 3. report_formatter.format_report() - 生成 Markdown 报告
+# 4. save_report() - 保存到文件
+# 5. notifier.send_report() - 推送到微信（自动格式化）
 ```
 
 ---
@@ -205,6 +246,11 @@ bot.run()
 │   utils     │ ◀────使用────┐
 └──────────────┘              │
                              │
+┌──────────────┐ ◀──使用──┐
+│  formatters │          │
+└──────┬───────┘          │
+       │                  │
+       ▼                  │
 ┌──────────────┐ ◀──通知──┘
 │ notification│
 └──────────────┘
@@ -216,10 +262,11 @@ bot.run()
 
 | 模块 | 依赖的模块 | 说明 |
 |------|-----------|------|
-| **main** | config, sources, llm, notification, utils | 协调所有模块 |
+| **main** | config, sources, llm, formatters, notification, utils | 协调所有模块 |
 | **sources** | config, utils | 读取配置，使用工具函数 |
 | **llm** | config, utils | 读取配置，使用文本处理函数 |
-| **notification** | config | 读取 Webhook 配置 |
+| **formatters** | 无 | 独立格式化逻辑 |
+| **notification** | config, formatters | 读取配置，使用格式化器 |
 | **utils** | 无 | 独立工具函数 |
 | **config** | 无 | 独立配置管理 |
 
