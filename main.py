@@ -1,514 +1,196 @@
-import arxiv
-from openai import OpenAI
+"""
+AI 前沿论文日报生成器 - 主程序入口
+
+模块化架构：
+- config: 配置管理
+- sources: 多数据源论文获取
+- llm: LLM 摘要生成
+- notification: 微信推送
+- utils: 辅助工具函数
+"""
+
 import datetime
-import os
-import time
-import httpx
-from dotenv import load_dotenv
-import json
-import feedparser
-from typing import List, Dict, Optional
-
-# 加载 .env 文件
-load_dotenv()
-
-# 配置部分：从环境变量读取 NVIDIA API Key
-NVIDIA_API_KEY = os.getenv('NVIDIA_API_KEY')
-if not NVIDIA_API_KEY:
-    raise ValueError("请设置环境变量 NVIDIA_API_KEY 或在 .env 文件中配置")
-
-# 获取企业微信 Webhook URL（可选）
-WECHAT_WEBHOOK = os.getenv('WECHAT_WEBHOOK')
-
-# 数据源配置
-SOURCES_CONFIG = {
-    'arxiv': {
-        'enabled': True,
-        'base_url': 'http://export.arxiv.org/api/query?',
-        'search_topics': [
-            "Large Language Models",
-            "LLM Agents",
-            "Chain of Thought",
-            "Batch of Thought",
-            "LLM Reasoning"
-        ]
-    },
-    'semantic_scholar': {
-        'enabled': False,  # 默认关闭，需要 API Key
-        'api_key': os.getenv('SEMANTIC_SCHOLAR_API_KEY'),
-        'search_topics': [
-            "large language models",
-            "LLM agents",
-            "reasoning optimization"
-        ]
-    },
-    'springer': {
-        'enabled': True,  # Springer 有公开的 RSS feeds
-        'urls': [
-            'https://link.springer.com/rss/journal/volumesandissues/12559',  # Machine Learning
-            'https://link.springer.com/rss/journal/volumesandissues/11032',  # Neural Computation
-        ]
-    }
-}
-
-# 初始化 NVIDIA 客户端
-http_client = httpx.Client(timeout=120.0)
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=NVIDIA_API_KEY,
-    http_client=http_client
-)
-
-def get_papers_from_springer(max_results=5) -> List[Dict]:
-    """
-    从 Springer RSS feeds 获取最新论文
-    """
-    papers_data = []
-    urls = SOURCES_CONFIG['springer'].get('urls', [])
-
-    for url in urls:
-        if not SOURCES_CONFIG['springer'].get('enabled', False):
-            continue
-
-        try:
-            print(f"正在从 Springer 获取论文: {url}")
-            feed = feedparser.parse(url)
-
-            for entry in feed.entries[:max_results]:
-                # 提取论文信息
-                authors = []
-                if hasattr(entry, 'authors'):
-                    authors = [author.get('name', '') for author in entry.authors]
-                elif hasattr(entry, 'author'):
-                    authors = [entry.author]
-
-                papers_data.append({
-                    "title": entry.get('title', '').strip(),
-                    "authors": authors,
-                    "abstract": entry.get('summary', '') or entry.get('description', ''),
-                    "url": entry.get('link', ''),
-                    "published": entry.get('published', ''),
-                    "source": "Springer"
-                })
-
-            print(f"✓ 从 Springer 获取到 {len(feed.entries[:max_results])} 篇论文")
-
-        except Exception as e:
-            print(f"⚠ Springer 获取失败: {e}")
-
-    return papers_data
-
-
-def get_papers_from_semantic_scholar(topic: str, max_results=3) -> List[Dict]:
-    """
-    从 Semantic Scholar API 获取论文（需要 API Key）
-    """
-    if not SOURCES_CONFIG['semantic_scholar'].get('enabled', False):
-        return []
-
-    api_key = SOURCES_CONFIG['semantic_scholar'].get('api_key')
-    if not api_key:
-        print("⚠ 未配置 Semantic Scholar API Key，跳过")
-        return []
-
-    papers_data = []
-    base_url = "https://api.semanticscholar.org/graph/v1/paper/search"
-
-    try:
-        print(f"正在从 Semantic Scholar 检索: {topic}")
-
-        params = {
-            'query': topic,
-            'limit': max_results,
-            'fields': 'title,authors,abstract,url,publicationDate',
-            'year': datetime.datetime.now().year  # 只获取今年的论文
-        }
-
-        headers = {'x-api-key': api_key}
-        response = httpx.get(base_url, params=params, headers=headers, timeout=30.0)
-
-        if response.status_code == 200:
-            data = response.json()
-            for paper in data.get('data', []):
-                authors = [author.get('name', '') for author in paper.get('authors', [])]
-
-                papers_data.append({
-                    "title": paper.get('title', ''),
-                    "authors": authors,
-                    "abstract": paper.get('abstract', '') or '无摘要',
-                    "url": paper.get('url', ''),
-                    "published": paper.get('publicationDate', ''),
-                    "source": "Semantic Scholar"
-                })
-
-            print(f"✓ 从 Semantic Scholar 获取到 {len(papers_data)} 篇论文")
-        else:
-            print(f"⚠ Semantic Scholar API 错误: {response.status_code}")
-
-    except Exception as e:
-        print(f"⚠ Semantic Scholar 请求失败: {e}")
-
-    return papers_data
-
-
-def get_latest_papers_with_retry(topic="Large Language Models", max_results=3, max_retries=3):
-    """
-    从 ArXiv 获取指定主题的最新论文，带重试机制
-    """
-    print(f"正在检索关于 {topic} 的最新论文...")
-
-    for attempt in range(max_retries):
-        try:
-            # 使用新的 Client API，配置页面大小和延迟
-            client_arxiv = arxiv.Client(page_size=10, delay_seconds=10)
-            search = arxiv.Search(
-                query=topic,
-                max_results=max_results,
-                sort_by=arxiv.SortCriterion.SubmittedDate
-            )
-
-            papers_data = []
-            for result in client_arxiv.results(search):
-                papers_data.append({
-                    "title": result.title,
-                    "authors": [author.name for author in result.authors],
-                    "abstract": result.summary,
-                    "url": result.entry_id,
-                    "published": result.published
-                })
-
-            print(f"✓ 成功获取 {len(papers_data)} 篇论文")
-            return papers_data
-
-        except Exception as e:
-            print(f"⚠ 请求失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 10
-                print(f"等待 {wait_time} 秒后重试...")
-                time.sleep(wait_time)
-            else:
-                print(f"✗ 无法获取关于 '{topic}' 的论文")
-                return []
-
-def extract_clean_summary(content):
-    """
-    从 API 响应中提取干净的格式化报告
-    """
-    lines = content.split('\n')
-
-    # 寻找报告开始标记（## 📄）
-    start_idx = -1
-    for i, line in enumerate(lines):
-        if '## 📄' in line or '论文标题' in line:
-            start_idx = i
-            break
-
-    if start_idx == -1:
-        # 如果没找到，尝试寻找第一个 ## 标题
-        for i, line in enumerate(lines):
-            if line.strip().startswith('##'):
-                start_idx = i
-                break
-
-    if start_idx == -1:
-        # 还没找到，就返回整个内容
-        return content
-
-    # 简化版本：直接从开始位置提取所有内容
-    # 只在遇到明显的思考过程章节标题时才进行过滤
-    result_lines = []
-    skip_next_lines = False
-    skip_reasoning_section = False
-
-    for i in range(start_idx, len(lines)):
-        line = lines[i]
-        stripped = line.strip()
-
-        # 检测思考过程的章节标题
-        if (stripped.startswith('### 1.') or
-            stripped.startswith('### 2.') or
-            stripped.startswith('### 3.') or
-            stripped.startswith('### 4.') or
-            stripped.startswith('### 5.') or
-            stripped.startswith('### 6.') or
-            stripped in ['### 分析', '### 步骤', '### 思路', '### 输出',
-                         '### 分析请求', '### 思考过程', '### 最终输出',
-                         '### **分析**', '### **步骤**', '### **思路**',
-                         '### 最终输出生成']):
-            skip_reasoning_section = True
-            continue
-
-        # 如果在思考过程中，跳过带编号的列表项
-        if skip_reasoning_section:
-            if (stripped.startswith('1. **') or
-                stripped.startswith('2. **') or
-                stripped.startswith('3. **') or
-                stripped.startswith('4. **') or
-                stripped.startswith('5. **') or
-                stripped.startswith('6. **')):
-                continue
-
-            # 如果遇到报告的主要章节，说明思考过程结束
-            if stripped.startswith('## ') or stripped.startswith('### 🎯') or stripped.startswith('### 💡') or stripped.startswith('### 🧐'):
-                skip_reasoning_section = False
-
-        # 如果不在跳过模式，保留这一行
-        if not skip_reasoning_section:
-            result_lines.append(line)
-
-    return '\n'.join(result_lines).strip()
-
-
-def validate_summary(content):
-    """
-    验证报告是否包含所有必需的章节
-    """
-    required_sections = [
-        '### 🎯 核心摘要',
-        '### 💡 核心创新点与贡献',
-        '### 🧐 简评与启示'
-    ]
-
-    missing = []
-    for section in required_sections:
-        if section not in content:
-            missing.append(section)
-
-    return missing
-
-
-def generate_summary(paper, max_retries=3):
-    """
-    调用 NVIDIA API 生成中文解读，带重试机制
-    """
-    print(f"正在研读论文：{paper['title']} ...")
-
-    # 使用更简洁的 prompt，明确要求只输出最终结果
-    prompt = f"""任务：翻译以下英文论文摘要为中文技术简报。
-
-必须严格按照以下格式输出，不要包含任何其他内容：
-
-## 📄 论文标题：[中文翻译的标题]
-**原标题**：{paper['title']}
-**第一作者**：{paper['authors'][0]} | **机构**：未知
-
-### 🎯 核心摘要
-[用中文翻译论文摘要，保持专业术语准确性，内容要完整详细]
-
-### 💡 核心创新点与贡献
-* [根据摘要列出3个核心创新点]
-* [创新点2]
-* [创新点3]
-
-### 🧐 简评与启示
-[一句话总结论文价值]
-
-论文摘要：{paper['abstract']}
-
-输出要求：
-1. 只输出格式化的报告内容
-2. 不要输出任何分析、思考过程、步骤说明
-3. 不要输出"好的，我来翻译"之类的开头
-4. 直接从"## 📄"开始输出
-5. 确保核心摘要部分有完整的内容，不要留空"""
-
-    for attempt in range(max_retries):
-        try:
-            response = client.chat.completions.create(
-                model="z-ai/glm4.7",
-                messages=[
-                    {"role": "system", "content": "你是一个专业的AI论文翻译助手。只输出格式化的中文报告，不要输出任何思考过程或分析说明。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=3500,  # 进一步增加到 3500
-            )
-
-            content = response.choices[0].message.content
-
-            if content:
-                # 清理输出，提取干净的报告
-                cleaned = extract_clean_summary(content)
-
-                # 验证是否包含所有必需章节
-                missing = validate_summary(cleaned)
-                if missing:
-                    print(f"⚠ 报告不完整，缺少章节: {', '.join(missing)}")
-                    if attempt < max_retries - 1:
-                        print(f"尝试 {attempt + 1} 不完整，准备重试...")
-                        time.sleep(30)
-                        continue
-                    else:
-                        print(f"⚠ 已达最大重试次数，返回不完整的结果")
-
-                return cleaned
-            else:
-                print("⚠ API 返回空内容")
-                return "⚠ 模型返回空内容，请重试"
-
-        except Exception as e:
-            error_msg = str(e)
-            print(f"⚠ 请求失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                wait_time = 30
-                print(f"等待 {wait_time} 秒后重试...")
-                time.sleep(wait_time)
-            else:
-                return f"⚠ API 请求失败，请稍后重试或检查 API Key 是否正确"
-
-def send_to_wechat(message):
-    """
-    将消息发送到企业微信群机器人
-    """
-    if not WECHAT_WEBHOOK:
-        print("⚠ 未配置企业微信 Webhook，跳过微信推送")
-        return False
-
-    try:
-        # 企业微信消息格式
-        data = {
-            "msgtype": "markdown",
-            "markdown": {
-                "content": message
-            }
-        }
-
-        response = httpx.post(
-            WECHAT_WEBHOOK,
-            json=data,
-            timeout=30.0
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('errcode') == 0:
-                print("✅ 微信推送成功")
-                return True
-            else:
-                print(f"⚠ 微信推送失败: {result.get('errmsg', '未知错误')}")
-                return False
-        else:
-            print(f"⚠ 微信推送请求失败: HTTP {response.status_code}")
+import re
+from typing import List, Dict
+
+from config import Settings, SOURCES_CONFIG
+from sources import ArxivSource, SpringerSource, SemanticScholarSource
+from llm import LLMClient
+from notification import WeChatNotifier
+from utils import deduplicate_papers
+
+
+class PaperBot:
+    """论文日报生成机器人"""
+
+    def __init__(self):
+        """初始化机器人"""
+        print("=" * 50)
+        print("AI 前沿论文日报生成器")
+        print("=" * 50)
+
+        # 初始化组件
+        self.llm_client = LLMClient()
+        self.notifier = WeChatNotifier()
+
+        # 初始化数据源
+        self.sources = []
+        if SOURCES_CONFIG['arxiv']['enabled']:
+            self.sources.append(ArxivSource(SOURCES_CONFIG['arxiv']))
+        if SOURCES_CONFIG['springer']['enabled']:
+            self.sources.append(SpringerSource(SOURCES_CONFIG['springer']))
+        if SOURCES_CONFIG['semantic_scholar']['enabled']:
+            self.sources.append(SemanticScholarSource(SOURCES_CONFIG['semantic_scholar']))
+
+        print(f"\n✓ 已初始化 {len(self.sources)} 个数据源")
+
+    def fetch_all_papers(self) -> List[Dict]:
+        """
+        从所有启用的数据源获取论文
+
+        Returns:
+            论文列表
+        """
+        print("\n📚 开始获取论文数据...")
+        print("=" * 50)
+
+        all_papers = []
+
+        # 从各数据源获取论文
+        for source in self.sources:
+            try:
+                papers = source.fetch_papers()
+                # 转换为字典格式
+                paper_dicts = [p.to_dict() for p in papers]
+                all_papers.extend(paper_dicts)
+            except Exception as e:
+                print(f"⚠ 数据源 {source.__class__.__name__} 出错: {e}")
+
+        # 去重
+        print(f"\n🔄 原始论文数: {len(all_papers)}")
+        unique_papers = deduplicate_papers(all_papers)
+        print(f"✓ 去重后: {len(unique_papers)}")
+
+        # 限制数量
+        papers = unique_papers[:Settings.MAX_PAPERS]
+        print(f"✓ 最终选取: {len(papers)} 篇\n")
+
+        return papers
+
+    def generate_daily_report(self, papers: List[Dict]) -> str:
+        """
+        生成日报内容
+
+        Args:
+            papers: 论文列表
+
+        Returns:
+            日报内容
+        """
+        # 统计各数据源
+        source_stats = {}
+        for paper in papers:
+            source = paper.get('source', 'Unknown')
+            source_stats[source] = source_stats.get(source, 0) + 1
+
+        # 构建报告头部
+        report = f"# 📅 AI 前沿论文日报 ({datetime.date.today()})\n\n"
+        report += f"**主题**: 大语言模型、智能体、增强型LLM推理和推理优化\n\n"
+        report += f"**数据源**: {', '.join(source_stats.keys())}\n\n"
+        report += f"今日为您精选 {len(papers)} 篇最新论文\n\n"
+
+        # 生成每篇论文的摘要
+        for i, paper in enumerate(papers, 1):
+            print(f"\n[进度] 处理第 {i}/{len(papers)} 篇论文...")
+
+            summary = self.llm_client.generate_summary(paper)
+
+            report += f"{summary}\n"
+            report += f"🔗 **原文链接**: {paper['url']}\n"
+            if 'source' in paper:
+                report += f"📚 **来源**: {paper['source']}\n"
+            report += "---\n\n"
+
+        return report
+
+    def save_report(self, report: str) -> None:
+        """
+        保存日报到文件
+
+        Args:
+            report: 日报内容
+        """
+        with open(Settings.REPORT_FILE, 'w', encoding='utf-8') as f:
+            f.write(report)
+        print(f"\n✅ 报告已保存到 {Settings.REPORT_FILE}")
+
+    def send_wechat_notification(self, report: str) -> bool:
+        """
+        发送微信通知
+
+        Args:
+            report: 日报内容
+
+        Returns:
+            是否发送成功
+        """
+        if not Settings.WECHAT_WEBHOOK:
+            print("\n⚠ 未配置企业微信 Webhook，跳过微信推送")
             return False
 
-    except Exception as e:
-        print(f"⚠ 微信推送异常: {e}")
-        return False
-
-
-def main():
-    # 1. 从多个数据源获取论文
-    print("="*50)
-    print("开始获取论文数据...")
-    print("="*50)
-
-    all_papers = []
-
-    # 1.1 从 ArXiv 获取论文
-    if SOURCES_CONFIG['arxiv'].get('enabled', False):
-        print("\n📚 数据源: ArXiv")
-        search_topics = SOURCES_CONFIG['arxiv'].get('search_topics', [])
-        for i, topic in enumerate(search_topics):
-            print(f"\n[{i+1}/{len(search_topics)}] 处理主题: {topic}")
-
-            # 每次主题之间添加延迟
-            if i > 0:
-                print(f"等待 15 秒后继续下一个主题...")
-                time.sleep(15)
-
-            papers = get_latest_papers_with_retry(topic=topic, max_results=1, max_retries=3)
-            all_papers.extend(papers)
-
-    # 1.2 从 Springer 获取论文
-    if SOURCES_CONFIG['springer'].get('enabled', False):
-        print("\n📚 数据源: Springer")
-        springer_papers = get_papers_from_springer(max_results=2)
-        all_papers.extend(springer_papers)
-
-    # 1.3 从 Semantic Scholar 获取论文
-    if SOURCES_CONFIG['semantic_scholar'].get('enabled', False):
-        print("\n📚 数据源: Semantic Scholar")
-        ss_topics = SOURCES_CONFIG['semantic_scholar'].get('search_topics', [])
-        for topic in ss_topics:
-            papers = get_papers_from_semantic_scholar(topic, max_results=1)
-            all_papers.extend(papers)
-
-    # 去重（基于URL）
-    seen_urls = set()
-    unique_papers = []
-    for paper in all_papers:
-        url = paper.get('url', '')
-        if url not in seen_urls:
-            seen_urls.add(url)
-            unique_papers.append(paper)
-
-    # 限制最多5篇
-    papers = unique_papers[:5]
-
-    if not papers:
-        print("\n⚠ 未能获取到任何论文，请稍后重试")
-        return
-
-    print(f"\n✓ 共获取到 {len(papers)} 篇论文\n")
-
-    # 统计各数据源
-    source_stats = {}
-    for paper in papers:
-        source = paper.get('source', 'Unknown')
-        source_stats[source] = source_stats.get(source, 0) + 1
-
-    daily_report = f"# 📅 AI 前沿论文日报 ({datetime.date.today()})\n\n"
-    daily_report += f"**主题**: 大语言模型、智能体、增强型LLM推理和推理优化\n\n"
-    daily_report += f"**数据源**: {', '.join(source_stats.keys())}\n\n"
-    daily_report += f"今日为您精选 {len(papers)} 篇最新论文\n\n"
-
-    # 2. 逐篇处理
-    for i, paper in enumerate(papers, 1):
-        print(f"\n处理第 {i}/{len(papers)} 篇论文...")
-        summary = generate_summary(paper, max_retries=3)
-
-        # 拼接内容
-        daily_report += f"{summary}\n"
-        daily_report += f"🔗 **原文链接**: {paper['url']}\n"
-        if 'source' in paper:
-            daily_report += f"📚 **来源**: {paper['source']}\n"
-        daily_report += "---\n\n"
-
-    # 3. 输出结果
-    print("\n" + "="*20 + " 生成结果 " + "="*20 + "\n")
-    print(daily_report)
-
-    # 4. 将结果保存到文件
-    with open('daily_report.md', 'w', encoding='utf-8') as f:
-        f.write(daily_report)
-    print("\n✅ 报告已保存到 daily_report.md")
-
-    # 5. 推送到微信（如果配置了 Webhook）
-    if WECHAT_WEBHOOK:
         print("\n正在推送到微信...")
+
         # 生成适合微信的消息格式（简化版）
         wechat_message = f"## 📅 AI 前沿论文日报 ({datetime.date.today()})\n\n"
         wechat_message += f"**主题**: 大语言模型、智能体、增强型LLM推理和推理优化\n\n"
-        wechat_message += f"**数据源**: {', '.join(source_stats.keys())}\n\n"
-        wechat_message += f"今日为您精选 {len(papers)} 篇最新论文\n\n"
 
-        # 从已生成的报告中提取论文标题
-        import re
+        # 从报告中提取论文标题
         title_pattern = r'## 📄 论文标题：(.*?)\n'
-        titles = re.findall(title_pattern, daily_report)
+        titles = re.findall(title_pattern, report)
 
         for i, title in enumerate(titles, 1):
             wechat_message += f"**{i}. {title}**\n\n"
 
-        # 添加 GitHub 链接（需要用户替换为自己的仓库地址）
-        wechat_message += f"\n📮 [点击查看完整报告](https://github.com/A-pricity/Daily_AI_Paper_Bot/blob/main/daily_report.md)"
+        # 添加 GitHub 链接
+        wechat_message += f"\n📮 [点击查看完整报告](https://github.com/A-pricity/Daily_AI_Paper_Bot/blob/main/{Settings.REPORT_FILE})"
 
-        send_to_wechat(wechat_message)
-    else:
-        print("\n⚠ 未配置企业微信 Webhook，跳过微信推送")
+        return self.notifier.send(wechat_message)
 
-    # 关闭 http 客户端
-    http_client.close()
+    def run(self):
+        """
+        运行完整的日报生成流程
+        """
+        try:
+            # 1. 获取论文
+            papers = self.fetch_all_papers()
+
+            if not papers:
+                print("\n⚠ 未能获取到任何论文，请稍后重试")
+                return
+
+            # 2. 生成日报
+            report = self.generate_daily_report(papers)
+
+            # 3. 输出结果
+            print("\n" + "=" * 20 + " 生成结果 " + "=" * 20 + "\n")
+            print(report)
+
+            # 4. 保存报告
+            self.save_report(report)
+
+            # 5. 推送到微信
+            self.send_wechat_notification(report)
+
+        finally:
+            # 清理资源
+            self.llm_client.close()
+
+
+def main():
+    """主函数"""
+    bot = PaperBot()
+    bot.run()
+
 
 if __name__ == "__main__":
     main()
