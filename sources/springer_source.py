@@ -3,7 +3,7 @@
 import feedparser
 from typing import List
 
-from .base import BasePaperSource, Paper
+from sources.base import BasePaperSource, Paper
 
 
 class SpringerSource(BasePaperSource):

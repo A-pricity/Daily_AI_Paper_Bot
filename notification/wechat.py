@@ -6,7 +6,7 @@
 import httpx
 from typing import Optional
 
-from ..config.settings import Settings
+from config.settings import Settings
 
 
 class WeChatNotifier:

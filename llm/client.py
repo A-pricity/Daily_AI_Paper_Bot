@@ -8,8 +8,8 @@ from typing import Optional
 import httpx
 from openai import OpenAI
 
-from ..config.settings import Settings
-from ..utils.helpers import extract_clean_summary, validate_summary
+from config.settings import Settings
+from utils.helpers import extract_clean_summary, validate_summary
 
 
 class LLMClient:

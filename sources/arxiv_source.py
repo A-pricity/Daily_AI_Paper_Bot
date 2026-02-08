@@ -4,8 +4,8 @@ import time
 import arxiv
 from typing import List
 
-from .base import BasePaperSource, Paper
-from ..config.settings import Settings
+from sources.base import BasePaperSource, Paper
+from config.settings import Settings
 
 
 class ArxivSource(BasePaperSource):
