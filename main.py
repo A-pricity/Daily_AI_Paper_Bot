@@ -140,7 +140,9 @@ class PaperBot:
         for name, notifier in self.notifiers:
             print(f"\n{'='*20} 推送到 {name} {'='*20}")
             try:
-                notifier.send_report(papers, metadata)
+                # 飞书使用完整文件推送
+                report_file = Settings.REPORT_FILE if name == 'Feishu' else None
+                notifier.send_report(papers, metadata, report_file=report_file)
 
                 # 飞书限流状态监控
                 if name == 'Feishu' and hasattr(notifier, 'get_rate_limit_status'):

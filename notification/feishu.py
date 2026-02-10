@@ -37,10 +37,10 @@ class FeishuNotifier:
 
     def send(self, message: str) -> bool:
         """
-        发送消息到飞书（自动限流）
+        发送消息到飞书（自动限流，支持 Markdown 和 Text 类型降级）
 
         Args:
-            message: Markdown 格式的消息
+            message: 消息内容
 
         Returns:
             是否发送成功
@@ -64,9 +64,30 @@ class FeishuNotifier:
             # 等待 30 秒避开高峰
             time.sleep(30)
 
+        # 先尝试 Markdown 类型
+        markdown_result = self._send_with_type(message, "markdown")
+        if markdown_result:
+            return True
+
+        # Markdown 失败，降级到 text 类型
+        print("⚠ Markdown 类型不支持，尝试 text 类型...")
+        text_result = self._send_with_type(self._markdown_to_text(message), "text")
+        return text_result
+
+    def _send_with_type(self, message: str, msg_type: str) -> bool:
+        """
+        使用指定类型发送消息
+
+        Args:
+            message: 消息内容
+            msg_type: 消息类型 (markdown/text)
+
+        Returns:
+            是否发送成功
+        """
         try:
             data = {
-                "msg_type": "markdown",
+                "msg_type": msg_type,
                 "content": {
                     "text": message
                 }
@@ -84,12 +105,12 @@ class FeishuNotifier:
             if response.status_code == 200:
                 result = response.json()
                 if result.get('code') == 0:
-                    print("✅ 飞书推送成功")
+                    print(f"✅ 飞书推送成功 ({msg_type})")
                     return True
                 else:
                     error_code = result.get('code')
                     error_msg = result.get('msg', '未知错误')
-                    print(f"⚠ 飞书推送失败: [{error_code}] {error_msg}")
+                    print(f"⚠ 飞书推送失败 ({msg_type}): [{error_code}] {error_msg}")
 
                     # 处理限流错误
                     if error_code == 11232:
@@ -105,24 +126,57 @@ class FeishuNotifier:
             print(f"⚠ 飞书推送异常: {e}")
             return False
 
+    def _markdown_to_text(self, markdown: str) -> str:
+        """
+        将 Markdown 转换为纯文本（简化版）
+
+        Args:
+            markdown: Markdown 格式文本
+
+        Returns:
+            纯文本
+        """
+        # 移除 Markdown 标记，保留内容
+        text = markdown
+        # 移除标题标记
+        text = text.replace('### ', '').replace('## ', '').replace('# ', '')
+        # 移除粗体标记
+        text = text.replace('**', '')
+        # 移除链接标记，保留 URL
+        text = text.replace('[', '').replace('](', ' ').replace(')', '')
+        # 移除引用标记
+        text = text.replace('> ', '')
+        # 移除列表标记
+        text = text.replace('* ', '• ')
+        # 移除代码块标记
+        text = text.replace('`', '')
+
+        return text
+
     def send_report(
         self,
         papers: List[Dict],
         metadata: Optional[Dict] = None,
-        formatter=None
+        formatter=None,
+        report_file: str = None
     ) -> bool:
         """
-        发送论文报告（自动格式化）
+        发送论文报告（支持完整文件推送或自动格式化）
 
         Args:
             papers: 论文列表
             metadata: 元数据（日期、主题等）
             formatter: 格式化器
+            report_file: 报告文件路径（直接读取文件发送）
 
         Returns:
             是否发送成功
         """
         print("\n正在推送到飞书...")
+
+        # 优先读取 report_file（完整内容）
+        if report_file:
+            return self._send_full_report(report_file)
 
         # 延迟加载格式化器避免循环依赖
         if formatter is None:
@@ -163,6 +217,127 @@ class FeishuNotifier:
             if now.hour == hour and (minute - 5 <= now.minute <= minute + 5):
                 return True
         return False
+
+    def _send_full_report(self, report_file: str) -> bool:
+        """
+        发送完整报告文件（支持自动分段）
+
+        Args:
+            report_file: 报告文件路径
+
+        Returns:
+            是否发送成功
+        """
+        try:
+            with open(report_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # 添加摘要预览
+            content_with_preview = self._add_preview_header(content)
+
+            # 检查消息大小
+            message_size = len(content_with_preview.encode('utf-8'))
+            print(f"📄 报告大小: {message_size} bytes ({message_size/1024:.2f} KB)")
+
+            if message_size <= self.MAX_REQUEST_SIZE:
+                # 单条消息发送
+                return self.send(content_with_preview)
+            else:
+                # 分段发送
+                print(f"📊 内容超过单条限制，进行分段处理...")
+                return self._send_segmented(content_with_preview)
+
+        except FileNotFoundError:
+            print(f"⚠ 报告文件不存在: {report_file}")
+            return False
+        except Exception as e:
+            print(f"⚠ 读取报告文件失败: {e}")
+            return False
+
+    def _add_preview_header(self, content: str) -> str:
+        """
+        添加摘要预览头部
+
+        Args:
+            content: 原始内容
+
+        Returns:
+            带有预览的内容
+        """
+        lines = content.split('\n')
+        preview_lines = []
+
+        # 提取预览信息（前 15 行）
+        for i, line in enumerate(lines[:15]):
+            if line.strip():
+                preview_lines.append(line)
+
+        # 构建预览头部
+        preview_header = [
+            "# 📅 AI 前沿论文日报",
+            "\n",
+            "> **提示**: 长按消息可查看完整内容，或访问 daily_report.md 文件",
+            "\n",
+            "---",
+            "\n"
+        ]
+
+        return '\n'.join(preview_header + lines)
+
+    def _send_segmented(self, content: str) -> bool:
+        """
+        分段发送长消息
+
+        Args:
+            content: 完整内容
+
+        Returns:
+            是否全部发送成功
+        """
+        lines = content.split('\n')
+        segments = []
+        current_segment = []
+        current_size = 0
+
+        # 按论文分界符分段
+        for line in lines:
+            line_size = len(line.encode('utf-8')) + 1  # +1 for newline
+
+            # 检查是否达到分段边界
+            if current_size + line_size > self.MAX_REQUEST_SIZE - 500:  # 预留 500 字节
+                if current_segment:
+                    segments.append('\n'.join(current_segment))
+                    current_segment = []
+                    current_size = 0
+
+            current_segment.append(line)
+            current_size += line_size
+
+        # 添加最后一段
+        if current_segment:
+            segments.append('\n'.join(current_segment))
+
+        print(f"📊 共分 {len(segments)} 段发送")
+
+        # 依次发送各段
+        all_success = True
+        for i, segment in enumerate(segments, 1):
+            print(f"\n[{i}/{len(segments)}] 发送第 {i} 段...")
+            success = self.send(segment)
+            if not success:
+                all_success = False
+                print(f"⚠ 第 {i} 段发送失败")
+
+            # 非最后一段等待 1 秒
+            if i < len(segments):
+                time.sleep(1)
+
+        if all_success:
+            print("✅ 全部分段发送完成")
+        else:
+            print("⚠ 部分段落发送失败")
+
+        return all_success
 
     def _compress_message(self, message: str, max_size: int) -> str:
         """压缩消息以符合大小限制"""
