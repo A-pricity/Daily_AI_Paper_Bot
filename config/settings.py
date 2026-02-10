@@ -20,6 +20,7 @@ class Settings:
 
     # 通知配置
     WECHAT_WEBHOOK: Optional[str] = os.getenv('WECHAT_WEBHOOK')
+    FEISHU_WEBHOOK: Optional[str] = os.getenv('FEISHU_WEBHOOK')
 
     # NVIDIA API 配置
     NVIDIA_API_BASE_URL: str = "https://integrate.api.nvidia.com/v1"

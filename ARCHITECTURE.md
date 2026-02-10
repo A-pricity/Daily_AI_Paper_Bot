@@ -117,17 +117,18 @@ summary = generate_paper_summary(paper_dict)
 
 **职责**：
 - 将论文数据转换为不同格式的消息
-- 支持多种输出格式（Markdown、企业微信等）
+- 支持多种输出格式（Markdown、企业微信、飞书等）
 - 统一的格式化接口
 
 **核心类**：
 - `BaseFormatter`: 抽象基类，定义统一接口
 - `MarkdownFormatter`: Markdown 格式化器，用于生成文件
 - `WeChatFormatter`: 企业微信格式化器，紧凑布局，适合移动端
+- `FeishuFormatter`: 飞书格式化器，针对 20KB 限制优化，关键信息前置
 
 **接口**：
 ```python
-from formatters import MarkdownFormatter, WeChatFormatter
+from formatters import MarkdownFormatter, WeChatFormatter, FeishuFormatter
 
 # Markdown 格式化器（用于文件）
 md_formatter = MarkdownFormatter()
@@ -136,6 +137,10 @@ markdown_report = md_formatter.format_report(papers, metadata)
 # 企业微信格式化器（用于推送）
 wechat_formatter = WeChatFormatter()
 wechat_message = wechat_formatter.format_report(papers, metadata)
+
+# 飞书格式化器（用于推送，带限流控制）
+feishu_formatter = FeishuFormatter()
+feishu_message = feishu_formatter.format_report(papers, metadata)
 
 # 单篇论文格式化
 formatted_paper = wechat_formatter.format_paper(paper)
@@ -146,23 +151,38 @@ formatted_paper = wechat_formatter.format_paper(paper)
 ### 5. notification (通知模块)
 
 **职责**：
-- 封装企业微信推送逻辑
+- 封装企业微信和飞书推送逻辑
 - 集成格式化器，支持自动格式化发送
+- 飞书限流控制和错峰发送策略
 
 **核心类**：
 - `WeChatNotifier`: 企业微信通知器
+- `FeishuNotifier`: 飞书通知器（带限流控制）
 
 **接口**：
 ```python
-from notification import WeChatNotifier
+from notification import WeChatNotifier, FeishuNotifier
 
-notifier = WeChatNotifier()
+# 企业微信通知器
+wechat_notifier = WeChatNotifier()
+success = wechat_notifier.send(markdown_message)
+success = wechat_notifier.send_report(papers, metadata)
 
-# 发送已格式化的消息
-success = notifier.send(markdown_message)
+# 飞书通知器（自动限流）
+feishu_notifier = FeishuNotifier()
+success = feishu_notifier.send(markdown_message)
+success = feishu_notifier.send_report(papers, metadata)
 
-# 发送论文报告（自动格式化）
-success = notifier.send_report(papers, metadata)
+# 查看飞书限流状态
+status = feishu_notifier.get_rate_limit_status()
+print(status)
+# {
+#   'requests_this_minute': 2,
+#   'requests_remaining': 98,
+#   'seconds_until_reset': 45,
+#   'is_peak_hour': False,
+#   'last_request_seconds_ago': 10
+# }
 ```
 
 ---

@@ -16,7 +16,7 @@ from typing import List, Dict
 from config import Settings, SOURCES_CONFIG
 from sources import ArxivSource, SpringerSource, SemanticScholarSource
 from llm import LLMClient
-from notification import WeChatNotifier
+from notification import WeChatNotifier, FeishuNotifier
 from formatters import MarkdownFormatter
 from utils import deduplicate_papers
 
@@ -32,12 +32,29 @@ class PaperBot:
 
         # 初始化组件
         self.llm_client = LLMClient()
-        self.notifier = WeChatNotifier()
+        self.notifiers = self._init_notifiers()
         self.report_formatter = MarkdownFormatter()
 
         # 初始化数据源
         self.sources = self._init_sources()
         print(f"\n✓ 已初始化 {len(self.sources)} 个数据源")
+
+    def _init_notifiers(self) -> List:
+        """初始化通知器"""
+        notifiers = []
+
+        if Settings.WECHAT_WEBHOOK:
+            notifiers.append(('WeChat', WeChatNotifier()))
+            print("✓ 企业微信通知器已启用")
+
+        if Settings.FEISHU_WEBHOOK:
+            notifiers.append(('Feishu', FeishuNotifier()))
+            print("✓ 飞书通知器已启用")
+
+        if not notifiers:
+            print("⚠ 未配置任何通知器")
+
+        return notifiers
 
     def _init_sources(self) -> List:
         """初始化数据源"""
@@ -97,17 +114,40 @@ class PaperBot:
             paper['summary'] = self.llm_client.generate_summary(paper)
         return papers
 
-    def save_report(self, papers: List[Dict], report: str) -> None:
+    def save_report(self, report: str) -> None:
         """
         保存日报到文件
 
         Args:
-            papers: 论文列表
             report: 报告内容
         """
         with open(Settings.REPORT_FILE, 'w', encoding='utf-8') as f:
             f.write(report)
         print(f"\n✅ 报告已保存到 {Settings.REPORT_FILE}")
+
+    def _send_notifications(self, papers: List[Dict], metadata: Dict) -> None:
+        """
+        发送通知到所有启用的渠道
+
+        Args:
+            papers: 论文列表
+            metadata: 元数据
+        """
+        if not self.notifiers:
+            print("\n⚠ 未配置任何通知器，跳过推送")
+            return
+
+        for name, notifier in self.notifiers:
+            print(f"\n{'='*20} 推送到 {name} {'='*20}")
+            try:
+                notifier.send_report(papers, metadata)
+
+                # 飞书限流状态监控
+                if name == 'Feishu' and hasattr(notifier, 'get_rate_limit_status'):
+                    status = notifier.get_rate_limit_status()
+                    print(f"📊 限流状态: {status}")
+            except Exception as e:
+                print(f"⚠ {name} 推送失败: {e}")
 
     def run(self):
         """
@@ -136,10 +176,10 @@ class PaperBot:
             print(report)
 
             # 5. 保存报告
-            self.save_report(papers, report)
+            self.save_report(report)
 
-            # 6. 推送到微信（自动格式化）
-            self.notifier.send_report(papers, metadata)
+            # 6. 推送到各通知渠道
+            self._send_notifications(papers, metadata)
 
         finally:
             # 清理资源

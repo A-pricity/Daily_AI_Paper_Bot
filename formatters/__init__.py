@@ -3,9 +3,11 @@
 from .base import BaseFormatter
 from .markdown import MarkdownFormatter
 from .wechat import WeChatFormatter
+from .feishu import FeishuFormatter
 
 __all__ = [
     'BaseFormatter',
     'MarkdownFormatter',
-    'WeChatFormatter'
+    'WeChatFormatter',
+    'FeishuFormatter'
 ]

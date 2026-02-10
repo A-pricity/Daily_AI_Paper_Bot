@@ -29,4 +29,5 @@ jobs:
       env:
         NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+        FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
       run: python main.py
